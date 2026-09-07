@@ -214,7 +214,7 @@ Succeeded
 Navigate to:
 
 ```text
-Operators → Installed Operators
+Ecosystem → Installed Operators
 ```
 
 Open:
