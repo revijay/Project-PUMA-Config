@@ -180,7 +180,7 @@ Create
 Navigate to:
 
 ```text
-Operators → OperatorHub
+Ecosystem → Software Catalog
 ```
 
 Search:
