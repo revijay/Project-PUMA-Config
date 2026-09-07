@@ -235,7 +235,7 @@ Click:
 Create IBMUsageMetering
 ```
 
-Paste:
+Paste below in the yaml view:
 
 ```yaml
 apiVersion: operator.ibm.com/v1
