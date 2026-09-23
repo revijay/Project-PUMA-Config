@@ -551,4 +551,4 @@ curl -X POST \
 ---
 
 ## Create route or endpoint in UMS
-By default only fetch endpoint will be generated in UMS. But if you want to add an upload endpoint, you can do so by referring this[https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.19.x?topic=c-creating-routes] guide
+By default only fetch endpoint will be generated in UMS. But if you want to add an upload endpoint, you can do so by referring [this](https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.19.x?topic=c-creating-routes) guide
