@@ -20,7 +20,7 @@ Navigate to:
 
 Select:
 
-**Build VM / OCP**
+**VMs -> Build VM / OCP**
 
 Choose:
 
