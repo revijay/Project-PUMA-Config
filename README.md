@@ -377,7 +377,7 @@ type: Opaque
 Navigate to:
 
 ```text
-Operators → Installed Operators → IBM Usage Metering
+Operators → Installed Operators → IBM Usage Metering (under Provided APIs section) -> click on ibm-usage-metering-instance
 ```
 
 Open:
