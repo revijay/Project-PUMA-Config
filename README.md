@@ -599,6 +599,10 @@ curl -X POST "https://sandbox.swc.saas.ibm.com/metering/api/v2/metrics" \
   -F "file=@swc_payload.tar.gz;type=application/gzip"
 ```
 
+View the metrics in the Software Central Sandbox dashboard:
+
+https://sandbox.swc.saas.ibm.com/en-in/software-central/workspace/dashboard/usage?fromDate=1762214400000&toDate=1793750399999
+
 ---
 
 # Amplitude Setup
