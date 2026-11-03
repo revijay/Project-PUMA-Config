@@ -1,5 +1,7 @@
 # Project PUMA Environment Setup
 
+# UMS Setup
+
 ## Step 1 - Create a Development Cluster in FYRE
 
 ### 1. Log in to FYRE
@@ -330,7 +332,48 @@ These routes are required for:
 
 ---
 
-## Step 9 - Create an IBM Entitlement Key Secret
+## Step 9 - Create Route or Endpoint in UMS
+
+If you want to host Usage Metering Service at a public URL and the route was not created automatically during installation, create the route manually.
+
+### Procedure
+
+1. Log in to your OpenShift cluster console.
+2. Navigate to:
+
+```text
+Networking → Routes
+```
+
+3. From the **Project** drop-down list, choose `puma` (or `ibm-usage-metering`).
+4. To create the `ibm-usage-metering-fetch` route, click **Create Route**, and choose **YAML view**.
+5. Update the `spec` section as follows:
+
+```yaml
+spec:
+  # Example: ibm-usage-metering-fetch-ibm-usage-metering.apps.cluster.domain.com
+  host: ${ROUTE_HOSTNAME}
+  
+  # Target service
+  to:
+    kind: Service
+    name: ibm-usage-metering-instance
+    weight: 100
+  
+  # Port configuration - using named port 'ibm-usage-metering-fetch'
+  port:
+    targetPort: ibm-usage-metering-fetch
+```
+
+> **Note:** `${ROUTE_HOSTNAME}` is an alias or DNS that points to the service.
+
+6. Click **Create**.
+
+For additional details, refer to the official IBM documentation on [Creating routes](https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.19.x?topic=c-creating-routes).
+
+---
+
+## Step 10 - Create an IBM Entitlement Key Secret
 
 Obtain an IBM Entitlement Key from:
 
@@ -372,7 +415,7 @@ type: Opaque
 
 ---
 
-## Step 10 - Configure Software Central Integration (Sandbox)
+## Step 11 - Configure Software Central Integration (Sandbox)
 
 Navigate to:
 
@@ -402,7 +445,7 @@ Save the resource.
 
 ---
 
-## Step 11 - Verify Software Central Configuration
+## Step 12 - Verify Software Central Configuration
 
 Verify the IBMUsageMetering resource contains:
 
@@ -422,65 +465,6 @@ Ready
 ```
 
 > Note: After Software Central Sandbox is enabled, UMS automatically generates and uploads payloads on its configured schedule. Data may not appear immediately in downstream systems such as Segment and Amplitude.
-
----
-
-## Step 12 - Create an Amplitude Chart to View Liberty Usage Metrics (Sandbox)
-
-### 1. Log in and Select the Sandbox Project
-
-1. Log in to Amplitude using your IBM SSO credentials.
-2. In the top-left corner dropdown, search for and select:
-
-```text
-Red Hat Marketplace Data Pipeline Test (Project ID: 323463)
-```
-
-> Note: This is the designated sandbox workspace for Software Central test telemetry.
-
-### 2. Create a New Segmentation Chart
-
-1. Click the blue **+ Create** button in the left sidebar (or the **+** icon at the top left).
-2. Select **Chart** → choose **Segmentation**.
-
-### 3. Configure Events, Filters, and Grouping
-
-In the left configuration panel:
-
-**A. Select the Event**
-
-1. Under **Events or Metrics**, click **Select event...**.
-2. Search for and select: `Account Contractual Usage`.
-
-**B. Apply Filters**
-
-1. Click **+ Filter by**:
-   - Property: `productTitle`
-   - Operator: `=` (is)
-   - Value: `Liberty`
-2. Click **+ Filter by** again (optional, to isolate specific categories):
-   - Property: `productId`
-   - Operator: `=` (is)
-   - Values: select `feature`, `runtime-event`, and `version-event` within the same filter line.
-
-**C. Group by Metric / Feature**
-
-1. Click **+ Group-by** (next to **+ Filter by**).
-2. Select property: `productMetric` (or `unitDescription` / `metricId`).
-
-### 4. Configure Measurement and Visualization Settings
-
-1. **Change Measurement to Event Totals:** Under **Measured as** (in the middle-left section), click **Event Totals** (so it turns blue).
-2. **Set Date Range:** In the top-right corner of the chart area, click the date dropdown. Change from **Last 30 days** to **Last 7 days** or **Today** (Interval: Daily).
-3. **Switch Visualization Style:** Click the chart style dropdown next to the date picker and select **Bar chart** (or **Line chart**).
-
-### 5. Save the Chart to Your Team or Personal Space
-
-1. Click the **Save** button in the top-right corner.
-2. In the Save modal:
-   - Chart Name: `PUMA | Liberty Usage Metrics | Sandbox`
-   - Save Location: select your Team Space or Personal Space (e.g., Sweetty P Devassy's Space).
-3. Click **Save**.
 
 ---
 
@@ -576,38 +560,104 @@ is created.
 
 ## Export a Software Central Payload
 
-Generate a Software Central payload from UMS:
+Set up the required environment variables:
 
 ```bash
-curl \
---header "Authorization: Bearer <UMS_TOKEN>" \
---cacert ca.crt \
---output swc_payload.tar.gz \
-"<UMS_URL>/api/v1/swc"
+# 1. Get UMS Upload Route URL (for posting events)
+export UMS_URL=$(oc get route ibm-usage-metering-upload -n puma -o jsonpath='{.spec.host}')
+
+# 2. Get UMS Fetch Route URL (for exporting SWC payloads)
+export FETCH_URL=$(oc get route ibm-usage-metering-fetch -n puma -o jsonpath='{.spec.host}')
+
+# 3. Get UMS API Token
+export UMS_TOKEN=$(oc get secret ibm-usage-metering-upload-token -n puma -o jsonpath='{.data.token}' | base64 -d)
+
+# 4. Get Software Central Entitlement Key
+export SWC_TOKEN=$(oc get secret swc-entitlement-key -n puma -o jsonpath='{.data.token}' | base64 -d)
+
+# 5. Verify all variables are populated
+echo "UMS_URL   : https://${UMS_URL}"
+echo "FETCH_URL : https://${FETCH_URL}"
+echo "UMS_TOKEN : ${UMS_TOKEN:0:10}..."
+echo "SWC_TOKEN : ${SWC_TOKEN:0:10}..."
 ```
 
-Verify:
+Export and send the payload:
+
+```bash
+# 1. Export the Software Central payload
+curl -k -L -X GET "https://${FETCH_URL}/api/v1/swc" \
+  -H "Authorization: Bearer ${UMS_TOKEN}" \
+  --output swc_payload.tar.gz
+
+# 2. Verify file was created (should be > 1 KB)
+ls -lh swc_payload.tar.gz
+
+# 3. Push payload directly to Software Central Sandbox
+curl -X POST "https://sandbox.swc.saas.ibm.com/metering/api/v2/metrics" \
+  -H "Authorization: Bearer ${SWC_TOKEN}" \
+  -F "file=@swc_payload.tar.gz;type=application/gzip"
+```
+
+---
+
+# Amplitude Setup
+
+## Create an Amplitude Chart to View Liberty Usage Metrics (Sandbox)
+
+### 1. Log in and Select the Sandbox Project
+
+1. Log in to Amplitude using your IBM SSO credentials.
+2. In the top-left corner dropdown, search for and select:
 
 ```text
-swc_payload.tar.gz
+Red Hat Marketplace Data Pipeline Test (Project ID: 323463)
 ```
 
-is created.
+> Note: This is the designated sandbox workspace for Software Central test telemetry.
+
+### 2. Create a New Segmentation Chart
+
+1. Click the blue **+ Create** button in the left sidebar (or the **+** icon at the top left).
+2. Select **Chart** → choose **Segmentation**.
+
+### 3. Configure Events, Filters, and Grouping
+
+In the left configuration panel:
+
+**A. Select the Event**
+
+1. Under **Events or Metrics**, click **Select event...**.
+2. Search for and select: `Account Contractual Usage`.
+
+**B. Apply Filters**
+
+1. Click **+ Filter by**:
+   - Property: `productTitle`
+   - Operator: `=` (is)
+   - Value: `Liberty`
+2. Click **+ Filter by** again (optional, to isolate specific categories):
+   - Property: `productId`
+   - Operator: `=` (is)
+   - Values: select `feature`, `runtime-event`, and `version-event` within the same filter line.
+
+**C. Group by Metric / Feature**
+
+1. Click **+ Group-by** (next to **+ Filter by**).
+2. Select property: `productMetric` (or `unitDescription` / `metricId`).
+
+### 4. Configure Measurement and Visualization Settings
+
+1. **Change Measurement to Event Totals:** Under **Measured as** (in the middle-left section), click **Event Totals** (so it turns blue).
+2. **Set Date Range:** In the top-right corner of the chart area, click the date dropdown. Change from **Last 30 days** to **Last 7 days** or **Today** (Interval: Daily).
+3. **Switch Visualization Style:** Click the chart style dropdown next to the date picker and select **Bar chart** (or **Line chart**).
+
+### 5. Save the Chart to Your Team or Personal Space
+
+1. Click the **Save** button in the top-right corner.
+2. In the Save modal:
+   - Chart Name: `PUMA | Liberty Usage Metrics | Sandbox`
+   - Save Location: select your Team Space or Personal Space (e.g., Sweetty P Devassy's Space).
+3. Click **Save**.
 
 ---
-
-## Manually Upload a Payload to Software Central Sandbox
-
-Use only for troubleshooting or validation purposes.
-
-```bash
-curl -X POST \
-"https://sandbox.swc.saas.ibm.com/metering/api/v2/metrics" \
--H "Authorization: Bearer <IBM_ENTITLEMENT_KEY>" \
--F "file=@swc_payload.tar.gz;type=application/gzip"
-```
-
----
-
-## Create route or endpoint in UMS
-By default one fetch endpoint and upload endpoint will be generated in UMS. But the upload endpoint can only be fetched from the cluster only. If you want to add an upload endpoint which can be called from outside then, you can do so by referring [this](https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.19.x?topic=c-creating-routes) guide.
