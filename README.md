@@ -801,6 +801,35 @@ cat << 'EOF' > /opt/ibm/wlp/iso-swid/ibm.com_WebSphere_Application_Server_Libert
 </SoftwareIdentity>
 EOF
 ```
+IMP:Manual Mode (Immediate Verification & PoC Testing)
+This document is for  static metrics
+For dynamic metrics, refer https://pages.github.ibm.com/cloud-license-reporter/UsageMeteringGuides/License_Metric_Tool/adoption_metrics/lmt_create_metadata_file.html#template-for-dynamic-metrics
+
+1. Manual mode uses local CLI scripts (./ums_export_data.sh and ./ums_upload_to_swc.sh) from your workstation to extract data from ILMT immediately and push it to Software Central/Amplitude within seconds.The 3 Critical Rules for Manual Mode:
+   
+  Rule 1: Completed Past Day Timestamp (yesterday):
+  
+  The ILMT Export API holds current-day active data until midnight UTC.
+  
+  To export immediately via ./ums_export_data.sh, the measurementTimestamp in liberty.ums.data.json MUST be set to a completed past date (e.g., yesterday = now - 1 day).
+
+  If set to today (now), the script returns "No new data available".
+  
+  Rule 2: Fresh Instance/Mapping ID for Repeated Same-Day Tests:
+  
+  Once ILMT exports a specific (mappingId + instanceId + timestamp) combination, it marks that record as already exported to prevent duplicate billing/reporting.
+  
+  If you need to run manual tests multiple times on the same day, change the instanceId (e.g. "/opt/ibm/wlp/manual_poc3", "/opt/ibm/wlp/manual_poc4") or mappingId to force ILMT to treat it as a new un-exported dataset.
+  
+  Rule 3: Wait for Hourly ETL Import:
+  
+  After running ./upload_results.sh on the VM, you must wait for the ILMT server to finish its scheduled hourly ETL import (runs at :30 past each hour).
+Check Management > Data Imports in the ILMT console for ETL from UMSImport: Success before running ./ums_export_data.sh 
+
+2. Automatic Mode (Production & Nightly Sync)
+"LAST" Processing Overwrite Rule:
+If multiple scans or version updates occur on the same calendar day, ILMT evaluates the LAST state at end-of-day. Only the final active state (e.g. 26.0.0.104) is packaged into that night's batch.
+
 
 ### 4.2 Creating the Metadata File (liberty.ums.meta.json)
 File Path: `/opt/ibm/wlp/iso-swid/liberty.ums.meta.json`
@@ -836,7 +865,7 @@ cat << 'EOF' > /opt/ibm/wlp/iso-swid/liberty.ums.meta.json
       "metricName": "INSTANCE_COUNT",
       "metricDescription": "Liberty Runtime Instance Count and Adoption Telemetry",
       "metricType": "ADOPTION",
-      "instanceId": "/opt/ibm/wlp"
+      "instanceId": "/opt/ibm/wlp/3"
     }
   }
 }
@@ -862,13 +891,12 @@ File Path: `/opt/ibm/wlp/iso-swid/liberty.ums.data.json`
 > **Note:** Placing `liberty.ums.data.json` directly inside `/opt/ibm/wlp/iso-swid/` alongside the metadata and SWID tag ensures the scanner creates a clean package with zero folder manifest warnings.
 
 Run this Python script on the VM to generate the payload:
-
+1. Manual Mode Testing
 ```bash
 python3 -c '
 import json, datetime
 
-# Current UTC timestamp
-now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+yesterday = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%dT12:00:00.000Z")
 RS = "\x1e"  # ASCII 0x1E Record Separator
 
 payload = [
@@ -876,11 +904,12 @@ payload = [
     "mappingId": "puma_liberty_adoption",
     "instances": [
       {
+        "instanceId": "/opt/ibm/wlp/3",
         "metrics": [
           {
-            "measurementTimestamp": now,
+            "measurementTimestamp": yesterday,
             "metricQuantity": 1,
-            "version": "26.0.0.7",
+            "version": "26.0.0.103",
             "java_version": "17.0.10",
             "os_version": "Linux 5.14.0",
             "is_containerized": 0,
@@ -896,10 +925,46 @@ payload = [
 
 with open("/opt/ibm/wlp/iso-swid/liberty.ums.data.json", "w", encoding="utf-8") as f:
     f.write(RS + json.dumps(payload, indent=2) + "\n")
-print(f"Generated liberty.ums.data.json with timestamp: {now}")
+print(f"Generated liberty.ums.data.json for completed day: {yesterday}")
 '
 ```
+2.Automatic Mode
+```bash
+python3 -c '
+import json, datetime
 
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+RS = "\x1e"  # ASCII 0x1E Record Separator
+
+record = [
+    {
+        "mappingId": "puma_liberty_adoption",
+        "instances": [
+            {
+                "instanceId": "/opt/ibm/wlp/3",
+                "metrics": [
+                    {
+                        "measurementTimestamp": now,
+                        "metricQuantity": 1,
+                        "version": "26.0.0.70",
+                        "java_version": "17.0.10",
+                        "os_version": "Linux 5.14.0",
+                        "is_containerized": 0,
+                        "feature_cdi": 1,
+                        "feature_jsonb": 1,
+                        "feature_mphealth": 1
+                    }
+                ]
+            }
+        ]
+    }
+]
+
+with open("/opt/ibm/wlp/iso-swid/liberty.ums.data.json", "w", encoding="utf-8") as f:
+    f.write(RS + json.dumps(record, indent=2) + "\n")
+print(f"SUCCESS: Generated with mappingId: puma_liberty_adoption (timestamp: {now})")
+'
+```
 ### 4.4 Pre-Flight Verification & Format Checks
 Run these checks on the VM:
 
@@ -1061,6 +1126,17 @@ After the ETL import completes:
 ### 8.2 Option B: Manual Offline Export & Upload Scripts (Immediate Verification)
 * **Timing Advantage:** If you perform these manual script steps (Option B), the adoption data is extracted and pushed immediately to Software Central Sandbox. You can see the metrics on Amplitude right away (within minutes) without waiting until the next day!
 
+CRITICAL RULES TO PREVENT "NO NEW DATA AVAILABLE" ERROR:
+
+To successfully export data using ./ums_export_data.sh without getting "No new data available", you must satisfy these 3 requirements:
+
+Completed Past Day: The measurementTimestamp in liberty.ums.data.json MUST be a completed past date (e.g. "2026-10-25T12:00:00.000Z"), NOT today's date. ILMT export API holds today's active data until midnight UTC.
+
+Unique Mapping ID / Instance ID: If you are testing repeatedly, use a fresh mappingId (e.g. "puma_manual_export_poc") and instanceId (e.g. "/opt/ibm/wlp/manual_poc") so ILMT does not skip the record as an already-exported period.
+
+Wait for Hourly Import: Ensure the LMT server finishes its hourly ETL import (Management -> Data Imports -> "ETL from UMSImport: Success") before running ./ums_export_data.sh.
+
+
 Download scripts package (`ums_export_data.sh` & `ums_upload_to_swc.sh`) from Box:
 - Box Link: https://ibm.ent.box.com/s/6gmvcbu7byruw7oatknd6lpytpljy28h
 
@@ -1122,6 +1198,12 @@ Download scripts package (`ums_export_data.sh` & `ums_upload_to_swc.sh`) from Bo
 
 **Q7: How to handle file rotation on the endpoint?**
 **A7:** When `liberty.ums.data.json` exceeds 100 KB, roll it to `liberty_1.ums.data.json` up to a maximum of 10 archive files. LMT scanner never deletes files on your VM.
+
+**Q8: Why does ./ums_export_data.sh show "No new data available"?**
+**A8:** This happens for 3 reasons:
+  1. The timestamp in liberty.ums.data.json is set to today (current day). ILMT only exports completed past days (e.g. yesterday or earlier).
+  2. The data for that past day/instanceId was already exported earlier. Change mappingId (e.g. puma_manual_export_poc) or instanceId (e.g. /opt/ibm/wlp/manual_poc) to create a new un-exported stream.
+  3. The hourly ETL import has not finished yet. Wait for Management -> Data Imports to show "ETL from UMSImport: Success" before running the export script.
 
 ---
 
