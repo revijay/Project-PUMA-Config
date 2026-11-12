@@ -609,7 +609,7 @@ is created.
 
 ---
 
-## Export a Software Central Payload
+## Export a Software Central Payload Manually from UMS
 
 Set up the required environment variables:
 
@@ -655,6 +655,257 @@ View the metrics in the Software Central Sandbox dashboard:
 https://sandbox.swc.saas.ibm.com/en-in/software-central/workspace/dashboard/usage?fromDate=1762214400000&toDate=1793750399999
 
 ---
+
+# UMS Adoption Metrics Testing (CR + mappingId)
+
+This section records how product-specific **adoption** data (as opposed to contractual licence data) was sent through UMS to Software Central and Amplitude, what was verified, and what is still open. It was tested on the `project-puma` namespace on 2026-11-12.
+
+## Summary of Results
+
+| Question | Answer |
+|---|---|
+| Can UMS send an event typed `ADOPTION`? | **[Tested]** Yes, when a registration CR (`IBMServiceMeterDefinition`) with `metricType: ADOPTION` exists and the payload carries its `mappingId`. |
+| Does the flat `/api/v1/event` payload give `ADOPTION`? | **[Tested]** No. UMS logged the converted record with `"metricType":"CONTRACTUAL"` and Amplitude showed `Account Contractual Usage`. |
+| Does an ADOPTION event reach Software Central? | **[Tested]** Yes. Upload status `success`, 1 of 1 events processed. |
+| Does it reach Amplitude? | **[Tested]** Yes, as the event `Account Adoption Usage`, about one minute after the upload. |
+| Are unregistered metric names rejected? | **[Tested]** Not in the sandbox. A made-up name (`libertyAdoptionTest`) in the metricName field passed UMS, Software Central and Amplitude. Production behaviour is **[Open]**. |
+| What `productId` is accepted? | **[Tested]** The ReadyTool Cloud Annotations `productID`. The 64-character SHA-256 hash failed in Software Central. |
+
+## Background: Why the Original Payload Did Not Work
+
+### The hash as `productId`
+
+Liberty originally sent a 64-character SHA-256 hash as `productId` in the flat payload. UMS accepted and exported these events, but they did not reach Amplitude, and Software Central showed `fixed_by_amendment`.
+
+Only `productId` differed between working and failing payloads. Results by length of the hash prefix **[Tested]**:
+
+| `productId` | Result |
+|---|---|
+| `runtime-event`, `version-event`, `test-product-123` | Reached Amplitude |
+| 16, 32 and 40 hex characters | Reached Amplitude |
+| 48, 56, 63 and 64 hex characters | Exported by UMS, not processed by Software Central |
+| 41 to 47 characters | Not tested |
+
+The Software Central contact said `productId` must be a valid ReadyTool product ID or part number. A repeated `eventId` is treated as an amendment.
+
+### The ReadyTool product ID
+
+| Product | Cloud Annotations `productID` | PID |
+|---|---|---|
+| Open Liberty | `faee6552d7104cc49c4cc1222ff6ea32` | `5724J08` (added by Software Central) |
+| WebSphere Liberty 26.0 | `63a2a4dfc91f4485994c7aab94c55ab1` | `5724-J08` |
+
+The Open Liberty ReadyTool entry lists only `PROCESSOR_VALUE_UNIT`, `SOCKET` and `VIRTUAL_PROCESSOR_CORE`, and shows "End-to-end validation with LS or UMS: Not done".
+
+With the Open Liberty ID in the flat payload and `productMetric=VIRTUAL_PROCESSOR_CORE`, the event reached Amplitude as `Account Contractual Usage`. Software Central added `productCode`, `UT30`, `UT35` and `offerAccountingSystemCode`. That event is **contractual**, so this payload should not ship.
+
+### `instanceId` in the flat payload
+
+Adding `instanceId` to the flat payload made UMS reject it **[Tested]**:
+
+```text
+could not parse payload: no valid data field present in payload
+```
+
+This happened with the ReadyTool ID and with `productId=runtime-event`. The same payloads without `instanceId` were accepted. `instanceId` belongs in the CR's `data` section and is not accepted in the flat event. Confirmation is **[Open]**.
+
+## Concepts
+
+### The two UMS resources
+
+| | `IBMUsageMetering` | `IBMServiceMeterDefinition` |
+|---|---|---|
+| Purpose | Installs and configures the UMS service | Describes one metric a product sends |
+| Created in | Step 6 of this guide (`ibm-usage-metering-instance`) | Not part of the base setup |
+| Contains | `license.accept`, `sender.softwareCentral` | `productId`, `productName`, `metricName`, `metricType`, `processing`, `mappingId`, optional `instanceId` |
+| Owner | Whoever deploys UMS | The product team |
+
+### CR, payload and `mappingId` **[Doc]**
+
+- The **CR is static**. It defines the metric once.
+- The **JSON payload is dynamic**. It carries the measured value, a timestamp and optional attributes.
+- **`mappingId`** appears in both. UMS finds the CR with the same `mappingId` and combines the two. Any unique string works. A product GUID is recommended.
+- The combined size of CR and payload must not exceed 100 KB (HTTP 400 above it).
+
+### `metricType` **[Doc]**
+
+| Value | Meaning |
+|---|---|
+| `CONTRACTUAL` | Defined in the product's licence information. Appears in the audit snapshot. |
+| `ADOPTION` | Not shown in compliance reports or the audit snapshot. Used only to track how much a product is used. |
+
+### `processing` **[Doc]**
+
+Defines how several payloads in one day combine: `MAX` (high-water mark), `ADD` (sum), `LAST` (last value), `COUNT` (number of payloads). A flat payload gets `MAX` by default **[Tested]**.
+
+### Defaults UMS applies when the CR does not set them **[Tested]**
+
+- `InstanceID` is the namespace (shown in Amplitude as the cluster plus namespace)
+- `Method` is `RATIO_SUM`
+- `MetricDescription` is the metric name
+
+## Procedure
+
+All commands assume namespace `project-puma`. Use the environment variables from **Export a Software Central Payload Manually from UMS**, and keep tokens out of commands you paste into chats or commits.
+
+### Step 1 - Confirm the CRD exists
+
+```bash
+oc get crd | grep -i servicemeterdefinition
+oc get ibmservicemeterdefinitions -A
+```
+
+The CRD `ibmservicemeterdefinitions.operator.ibm.com` is installed with the UMS operator. In this cluster no definitions existed before this test.
+
+### Step 2 - Create the registration CR
+
+`mappingId` must be a **string**. An all-digit value must be quoted, or `oc apply` fails with `spec.mappingId ... must be of type string: "number"`.
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: operator.ibm.com/v1
+kind: IBMServiceMeterDefinition
+metadata:
+  name: open-liberty-adoption-test
+  namespace: project-puma
+spec:
+  mappingId: "11111111111111111111111111111111"
+  processing: LAST
+  data:
+    productId: faee6552d7104cc49c4cc1222ff6ea32
+    productName: Open Liberty
+    metricName: libertyAdoptionTest
+    metricType: ADOPTION
+EOF
+oc get ibmservicemeterdefinitions -n project-puma
+```
+
+`libertyAdoptionTest` is a test-only metric name. Do not use it as a product metric.
+
+### Step 3 - Wait for the CR to load, then send the payload
+
+The payload carries only the `mappingId`, a timestamp and the value. `productId`, name, metric and type come from the CR.
+
+```bash
+curl -k -L -w "\n%{http_code}\n" -X POST "https://${UMS_URL}/api/v1/event" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${UMS_TOKEN}" \
+  -d '[{"mappingId":"11111111111111111111111111111111","instances":[{"metrics":[{"measurementTimestamp":"2026-11-11T00:00:00Z","metricQuantity":1}]}]}]'
+```
+
+**Timing [Tested]:** the same payload sent about 2 seconds after creating the CR returned `500` with `could not parse payload: productId is required`. Sent again after a few minutes it returned `200`. **[Inference]** the CR needs a short time to be picked up. The exact delay was not measured.
+
+Keep the response body when testing (do not use `-o /dev/null`). Errors are returned synchronously in the body, while some rejections only appear in the pod log.
+
+### Step 4 - Verify in UMS
+
+Pod log (`ibm-usage-metering-instance`) shows the CR and payload joined, with `"metricType":"ADOPTION"`:
+
+```text
+Checking payload {"data":{"measurementTimestamp":"2026-11-11T00:00:00Z","metricName":"libertyAdoptionTest","metricQuantity":1,"metricType":"ADOPTION","productId":"faee6552d7104cc49c4cc1222ff6ea32","productName":"Open Liberty"},"mappingId":"1111...","processing":"LAST"} against stored events
+...
+Validating payload
+Merging data from payloads with stored events
+Events updated successfully
+```
+
+The `warn ... does not support string indexing` line that precedes it comes from the old flat-format check and can be ignored for this format.
+
+Stored data (use the **fetch** route for `/api/v1/raw`):
+
+```bash
+export FETCH_URL=$(oc get route ibm-usage-metering-fetch -n project-puma -o jsonpath='{.spec.host}')
+curl -k -s -H "Authorization: Bearer ${UMS_TOKEN}" "https://${FETCH_URL}/api/v1/raw" | jq . | grep -n -B3 -A12 "libertyAdoptionTest"
+```
+
+Expected entry: `metricType: ADOPTION`, `processing: LAST`, and `dailyAggregates` for `2026-11-11` with `metricQuantity: 1`.
+
+### Step 5 - Export and find the event
+
+```bash
+curl -k -L -X GET "https://${FETCH_URL}/api/v1/swc" \
+  -H "Authorization: Bearer ${UMS_TOKEN}" \
+  --output swc_payload.tar.gz
+mkdir -p swc_check && tar -xzf swc_payload.tar.gz -C swc_check
+grep -n "libertyAdoptionTest" swc_check/usage.json
+```
+
+The exported event has `"metricType":"adoption"`. Earlier events have `"metricType":"contract"`.
+
+### Step 6 - Upload only the new event
+
+The export holds every stored event. Uploading all of it re-sends old events, and Software Central reports `multiStatus` with repeated `eventId`s treated as amendments. Filter to one event first:
+
+```bash
+mkdir -p swc_adoption
+cp swc_check/manifest.json swc_adoption/
+jq '.data |= map(select(.measuredUsage[0].metricId=="libertyAdoptionTest"))' swc_check/usage.json > swc_adoption/usage.json
+jq '.data | length' swc_adoption/usage.json     # expect 1
+tar -czf swc_adoption.tar.gz -C swc_adoption manifest.json usage.json
+
+curl -X POST "https://sandbox.swc.saas.ibm.com/metering/api/v2/metrics" \
+  -H "Authorization: Bearer ${SWC_TOKEN}" \
+  -F "file=@swc_adoption.tar.gz;type=application/gzip"
+```
+
+### Step 7 - Verify in Software Central and Amplitude
+
+1. Software Central Sandbox, **Incoming report status**: the row for `swc_adoption.tar.gz` shows `success`. The file status was `totalEvents: 1, routedEvents: 1, processedEvents: 1`.
+2. Amplitude (Red Hat Marketplace Data Pipeline Test, project 323463): search the event **`Account Adoption Usage`**. Do not filter on `Account Contractual Usage`.
+3. Useful filters: `productId = faee6552d7104cc49c4cc1222ff6ea32`, `unit = libertyAdoptionTest`, or `device_id =` the upload's correlation ID. The Amplitude `device_id` equals the Software Central correlation ID of the upload **[Tested]**, so the Amplitude "user" follows the upload and not the account.
+
+## Observed Result in Amplitude
+
+| Property | Value |
+|---|---|
+| `event_type` | `Account Adoption Usage` |
+| `productId` | `faee6552d7104cc49c4cc1222ff6ea32` |
+| `productTitle` | `Open Liberty` (taken from the CR) |
+| `productCode` / `productCodeType` | `5724J08` / `PID` (added by Software Central) |
+| `unit` | `libertyAdoptionTest` |
+| `quantity` / `quantityAggregator` | `1` / `last_value` |
+| `instanceId` | cluster plus namespace (set by UMS) |
+| `type` | `Daily Raw usage` |
+| `accountPlan` | `PAID` (the contractual events showed `CONTRACT`; cause unknown) |
+| `unitMetadata.usageDetails.startDate` | `Wed, 11 Nov 2026 00:00:00 GMT` |
+| `client_event_time` | one day after the usage date (`2026-11-12`) |
+
+Timing: upload at 07:08, event in Amplitude at 07:09.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `oc apply`: `spec.mappingId ... must be of type string: "number"` | All-digit `mappingId` parsed as a YAML number | Quote it: `mappingId: "1111..."` |
+| `Invalid URL ... [No Host]` HTML page from `errors.edgesuite.net` | `UMS_URL` empty in a new shell, so the request went to `https:///api/v1/event` | Re-export the variables, check `echo $UMS_URL` |
+| `500 could not parse payload: productId is required` | The CR was not loaded yet, or no CR matches the `mappingId` | Wait a few minutes and resend, check `oc get ibmservicemeterdefinitions -n project-puma` |
+| `200` but pod log shows `Rejecting data ... no valid data field present in payload` | `instanceId` (or unknown keys) in a flat payload | Remove it. In the CR format set `instanceId` in the CR |
+| Pod log: `parsing time "\u003c2026-11-05\u003eT00:00:00Z"` | Literal `<` `>` left around a date placeholder | Use a plain date: `2026-11-05` |
+| `jq: parse error` on `/api/v1/raw` | Wrong route or empty variable returning HTML or text | Use `${FETCH_URL}`, check with `curl -i` |
+| Software Central `multiStatus` | Unfiltered export re-sent old events | Filter to the new event (Step 6) |
+| Software Central `fixed_by_amendment` | Repeated `eventId`, or an invalid `productId` such as a hash | Use the ReadyTool ID, use a new date for the same product and metric |
+| Curly quotes (`”`) in a copied command | Pasted through a document | Use straight quotes, or use a heredoc |
+
+A `200` from `/api/v1/event` means the request was received. It does not prove the event was stored. Check the pod log or `/api/v1/raw`.
+
+## Notes on the Liberty Client
+
+- The Liberty code at the time of this test (branch `liberty-ums-integration`) still sends the **flat** payload with the SHA-256 hash as `productId` and the Liberty version in `productMetric`. It does not send the ReadyTool ID or use a CR.
+- A shippable client would send only `mappingId`, a UTC timestamp, the value and any attributes, using a URL, token and certificate read from configuration. It should send nothing when UMS is not configured and treat non-2xx responses as warnings.
+- The CR must exist before the client sends. The operator or Helm chart that deploys UMS should create it.
+- Security: do not commit tokens, the UMS URL or trust-all TLS code. A real bearer token was committed earlier and pushed. It must stay rotated.
+
+## UMS Deployment Model (from the IBM guides) **[Doc]**
+
+- UMS is installed in the **same namespace** as the product. One instance per namespace is the model, and several can be installed.
+- Supported on OpenShift and CNCF Kubernetes. Install methods are OLM catalog source, Helm, and CASE for air-gapped environments.
+- Standard mode covers usage-based and adoption metrics. PVU, VPC and GPGPU need the Helm install with the License Service sidecar.
+- Endpoint URL and TLS certificate are in the ConfigMap `ibm-usage-metering-upload-config` (the guide also names `ibm-usage-metering-service-upload-config`, which is inconsistent). The token is in the Secret `ibm-usage-metering-upload-token`, key `token`.
+- Containerized products use UMS. VMs and bare metal use ILMT (see the next section).
+- Recommended sending frequency is at least once a day.
+
+---
+
 
 # IBM License Metric Tool (ILMT) Setup
 
@@ -746,14 +997,14 @@ To get the official SWID tag for WebSphere Application Server Liberty:
 2. Click **Browse Products** in the top navigation bar.
 3. Search for **WebSphere Application Server Liberty** and click on it.
 4. Under the **Software Offering Structure**, click on **WebSphere Application Server Liberty 26.0**.
-5. Navigate to the **Software Components** section to see confirmed registration details:
+5. Navigate to the **Software Component Details** section to see confirmed registration details:
    - **Component Name:** WebSphere Application Server Liberty
    - **Persistent ID:** `fbf6a96d49214c0abc6a3bc5da6e48cd`
    - **Product ID (PID):** `5724J08`
    - **Product Persistent ID:** `63a2a4dfc91f4485994c7aab94c55ab1`
    - **Tagging Status:** `TAG_CONFIRMED`
    - **Software tag:** `ibm.com_WebSphere_Application_Server_Liberty-26.0.0.swidtag`
-6. Under **Component tags**, download the XML tag file or copy its content.
+6. Under **Software tags**, download the XML tag file(	ibm.com_WebSphere_Application_Server_Liberty-26.0.0.swidtag) or copy its content.
 
 ### 3.2 Product Manager LICR Review Workflow (For New Releases)
 When new software versions are registered:
@@ -917,7 +1168,7 @@ Run these checks on the VM:
 3. **Validate JSON syntax:**
    ```bash
    jq . /opt/ibm/wlp/iso-swid/liberty.ums.meta.json
-   tr -d '\x1e' < /opt/ibm/wlp/iso-swid/liberty.ums.data.json | jq .
+   tr -d '\036' < /opt/ibm/wlp/iso-swid/liberty.ums.data.json | jq .
    ```
 
 4. **Verify `mappingId` matches:**
@@ -990,6 +1241,7 @@ ls -la /opt/ibm/scanner/output/
 export DATA_UPLOAD_URL="adoption-metrics-test.pl.eurolabs.ibm.com:443"
 export DATA_UPLOAD_TOKEN="<PASTE_YOUR_API_TOKEN_HERE>"
 
+cd /opt/ibm/scanner
 ./upload_results.sh
 ```
 
@@ -1009,13 +1261,23 @@ export DATA_UPLOAD_TOKEN="<PASTE_YOUR_API_TOKEN_HERE>"
 
 ### 6.3 Option B: Manual Web Portal Upload
 (Use this if you prefer manual web uploads instead of Option A):
-1. Download the archive from VM to your Mac:
+
+> **Note on `/opt/ibm/scanner/output/`:** When you run `./upload_results.sh` (Option A), it automatically deletes the `.tar.gz` package after a successful upload to save disk space. If you want to perform a manual upload (Option B) after running Option A, generate a fresh archive first by running `./run_sw_and_pack.sh`.
+
+1. **(If output folder is empty) Generate a fresh scan package on the VM:**
+   ```bash
+   cd /opt/ibm/scanner
+   ./run_sw_and_pack.sh
+   ```
+
+2. **Download the archive from VM to your Mac:**
    ```bash
    scp 'root@<VM_IP>:/opt/ibm/scanner/output/*.tar.gz' ~/Downloads/
    ```
-2. Log in to ILMT Console: https://adoption-metrics-test.pl.eurolabs.ibm.com
-3. Go to **Management** -> **Scan Results Upload**.
-4. Select the downloaded `.tar.gz` archive and click **Upload**.
+
+3. **Log in to ILMT Console:** https://adoption-metrics-test.pl.eurolabs.ibm.com
+4. Go to **Management** -> **Scan Results Upload**.
+5. Select the downloaded `.tar.gz` archive and click **Upload**.
 
 ---
 
@@ -1122,6 +1384,9 @@ Download scripts package (`ums_export_data.sh` & `ums_upload_to_swc.sh`) from Bo
 
 **Q7: How to handle file rotation on the endpoint?**
 **A7:** When `liberty.ums.data.json` exceeds 100 KB, roll it to `liberty_1.ums.data.json` up to a maximum of 10 archive files. LMT scanner never deletes files on your VM.
+
+**Q8: Why is the `/opt/ibm/scanner/output/` folder empty after running `upload_results.sh`?**
+**A8:** `upload_results.sh` automatically removes uploaded `.tar.gz` packages upon successful upload to prevent disk space buildup. To obtain a package for manual inspection or web upload, re-run `./run_sw_and_pack.sh`.
 
 ---
 
