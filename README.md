@@ -668,7 +668,9 @@ This section records how product-specific **adoption** data (as opposed to contr
 | Does the flat `/api/v1/event` payload give `ADOPTION`? | **[Tested]** No. UMS logged the converted record with `"metricType":"CONTRACTUAL"` and Amplitude showed `Account Contractual Usage`. |
 | Does an ADOPTION event reach Software Central? | **[Tested]** Yes. Upload status `success`, 1 of 1 events processed. |
 | Does it reach Amplitude? | **[Tested]** Yes, as the event `Account Adoption Usage`, about one minute after the upload. |
-| Are unregistered metric names rejected? | **[Tested]** Not in the sandbox. A made-up name (`libertyAdoptionTest`) in the metricName field passed UMS, Software Central and Amplitude. Production behaviour is **[Open]**. |
+| Are unregistered metric names rejected? | **[Tested]** Not in the sandbox. A made-up name (`libertyAdoptionTest`) in the metricName field passed UMS, Software Central and Amplitude. **[Said]** names are a free choice, but check with core products. |
+| Is a CR required? | **[Said]** No. Payload-only works in the new format. **[Open]**, see Test 1. |
+| Can version and edition be sent? | **[Said]** Yes, with the DB2 pattern (`breakdownDefs`). **[Open]**, see Test 2. |
 | What `productId` is accepted? | **[Tested]** The ReadyTool Cloud Annotations `productID`. The 64-character SHA-256 hash failed in Software Central. |
 
 ## Background: Why the Original Payload Did Not Work
@@ -707,7 +709,7 @@ Adding `instanceId` to the flat payload made UMS reject it **[Tested]**:
 could not parse payload: no valid data field present in payload
 ```
 
-This happened with the ReadyTool ID and with `productId=runtime-event`. The same payloads without `instanceId` were accepted. `instanceId` belongs in the CR's `data` section and is not accepted in the flat event. Confirmation is **[Open]**.
+This happened with the ReadyTool ID and with `productId=runtime-event`. The same payloads without `instanceId` were accepted. **[Said]** `instanceId` is valid in the new format at instance level, and the flat format is the legacy API. Why the flat format rejects it is **[Open]**. The UMS team asked for the failing payload. See Test 1.
 
 ## Concepts
 
@@ -872,6 +874,148 @@ curl -X POST "https://sandbox.swc.saas.ibm.com/metering/api/v2/metrics" \
 
 Timing: upload at 07:08, event in Amplitude at 07:09.
 
+## Meeting Results with the UMS Team (2026-11-12)
+
+Source: meeting with Tomasz Zeller, Dariusz Permus and Michał Paluch. These are **[Said]** statements from the transcript and are not yet verified against the adopter's guide. Items marked *test* are covered by Test 1 or Test 2 below.
+
+| Topic | What was said | Status |
+|---|---|---|
+| `productId` | Use the ReadyTool ID. It is the reconciliation key (entitlement, CCID, IBM taxonomy). | Matches our test |
+| Flat payload (`productId`, `productMetric`, `metricValue`, `logDate`) | Legacy ILS-compatible API, CONTRACTUAL by design, only for products migrating from ILS. Do not use for new work. | Matches our test |
+| CR | Not required. Needed only for hierarchical metrics. A payload-only request works in the new format. A CR is recommended because static data lives there and payloads stay small. No CR-free example exists in the docs yet. | *Test 1* |
+| `instanceId` | A free string with no validation, default is the namespace. You define it with your own logic. It goes **in the payload at instance level**. | *Test 1* |
+| Our `instanceId` rejection | Unexplained. The UMS team asked for the failing payload and cluster access. | **[Open]** |
+| Aggregation | Depends on `processing`: `MAX` keeps the largest value, `ADD` sums the day's payloads. | Documented |
+| Who deploys UMS | The adopting product owns, installs, upgrades and configures it. Typically one per namespace. One can cover several namespaces. | Liberty-side owner **[Open]** |
+| Metric names | Free choice. No unified names for adoption metrics. Check with core products to avoid inventing names. | Choice **[Open]** |
+| Amendments | UMS accepts data up to 7 days back and re-uploads a changed day with the same event ID. The UMS team has not tested this. | Not tested |
+| API specification | No formal OpenAPI. The adopter's guide is the reference. | - |
+| Opt-out | UMS does not control the upload. The Software Central flag in the `IBMUsageMetering` CR or Helm values does. The IBM entitlement key must be configured. The product sets the flag per the customer's choice. | **[Open]** for Liberty |
+| Version and edition | Use the DB2 pattern: a CR with `breakdownDefs` (`groupBy` attributes), `processing: LAST`, `metricName: INSTANCE_COUNT`, and a payload with `mappingId`, `measurementTimestamp`, `metricQuantity: 1` and the attributes as plain fields. The meaning of `repeat: true` in the DB2 CR is unknown. | *Test 2* |
+| Our earlier test payload | A version-like value was used as `metricName`. That is the wrong place for it. | Understood |
+| Follow-up | Send the UMS team a spreadsheet of the desired metrics (version, deployment type, licence and so on). They will help shape the payload. | **[Open]** |
+
+## Test 1 - Payload Only, No CR, ADOPTION, `instanceId` at Instance Level
+
+**Purpose:** check the statements that a CR is optional and that `instanceId` is accepted inside the payload. Not run yet.
+
+All product data is in the payload. `<INSTANCE_ID>` is any string. Use a test value such as `test-instance-1` first, because the real source (hash, UUID, or `getServerId()`) is undecided.
+
+```bash
+export INSTANCE_ID=test-instance-1
+
+curl -k -L -w "\n%{http_code}\n" -X POST "https://${UMS_URL}/api/v1/event" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${UMS_TOKEN}" \
+  -d '[{"instances":[{"instanceId":"'"${INSTANCE_ID}"'","metrics":[{"productId":"faee6552d7104cc49c4cc1222ff6ea32","productName":"Open Liberty","metricName":"INSTANCE_COUNT","metricQuantity":1,"metricType":"ADOPTION","measurementTimestamp":"2026-11-12T00:00:00Z"}]}]}]'
+```
+
+If the response is a parse error that names `measurementTimestamp`, remove that field and resend. Keep the response body.
+
+**Check, in order:**
+
+1. HTTP status and body of the curl call.
+2. Pod log of `ibm-usage-metering-instance`: look for `Validating payload`, `Events updated successfully`, or `Rejecting data`. Confirm `"metricType":"ADOPTION"` and the `instanceId` value.
+3. Stored data:
+   ```bash
+   curl -k -s -H "Authorization: Bearer ${UMS_TOKEN}" "https://${FETCH_URL}/api/v1/raw" | jq . | grep -n -B3 -A12 "INSTANCE_COUNT"
+   ```
+4. Export and filter as in Steps 5 and 6, replacing `libertyAdoptionTest` with `INSTANCE_COUNT`. Expect exactly 1 event before uploading.
+5. Software Central status `success`, then Amplitude event `Account Adoption Usage`. Check whether `instanceId` is `test-instance-1` or still the cluster plus namespace.
+
+**Outcomes and what each means:**
+
+| Result | Meaning |
+|---|---|
+| Accepted, ADOPTION, custom `instanceId` reaches Amplitude | The CR is optional and `instanceId` in the payload works. Per-instance counts are possible. |
+| Accepted, but Amplitude shows cluster plus namespace | UMS or Software Central drops the custom `instanceId`. Ask the UMS team. |
+| `productId is required` or a similar rejection | A CR is needed in practice for this setup. Contradicts the meeting. Send the response to the UMS team. |
+| `no valid data field present in payload` | Same message as the flat-format failure. Send both payloads to the UMS team. |
+
+## Test 2 - Version and Edition Breakdown (DB2 Pattern)
+
+**Purpose:** check whether Liberty version and edition can be sent as breakdown attributes and whether they reach Amplitude. Not run yet.
+
+### 2.0 Confirm the CR schema first
+
+The exact field names of `breakdownDefs` are **not verified** here. The CRD in the cluster is the source of truth, and the DB2 example from the meeting chat is the model. Run:
+
+```bash
+oc get crd ibmservicemeterdefinitions.operator.ibm.com -o yaml | grep -n -i -B2 -A25 "breakdown"
+oc explain ibmservicemeterdefinition.spec --api-version=operator.ibm.com/v1
+```
+
+Compare the output with the CR below and correct field names before applying it. If the CRD has no `breakdownDefs`, the UMS version is too old and the test cannot run as written.
+
+### 2.1 Create the CR
+
+Unverified skeleton, based on the meeting description. Adjust to the schema from 2.0 and to the DB2 example.
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: operator.ibm.com/v1
+kind: IBMServiceMeterDefinition
+metadata:
+  name: open-liberty-breakdown-test
+  namespace: project-puma
+spec:
+  mappingId: "22222222222222222222222222222222"
+  processing: LAST
+  data:
+    productId: faee6552d7104cc49c4cc1222ff6ea32
+    productName: Open Liberty
+    metricName: INSTANCE_COUNT
+    metricType: ADOPTION
+  breakdownDefs:
+    - groupBy:
+        - libertyVersion
+        - edition
+EOF
+oc get ibmservicemeterdefinitions -n project-puma
+```
+
+Do not add `repeat: true` in the first run, because its meaning is unknown. If the DB2 CR has it, run a second pass with it and compare.
+
+### 2.2 Send a payload
+
+Wait a few minutes after creating the CR (see the timing note in Step 3).
+
+```bash
+curl -k -L -w "\n%{http_code}\n" -X POST "https://${UMS_URL}/api/v1/event" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${UMS_TOKEN}" \
+  -d '[{"mappingId":"22222222222222222222222222222222","instances":[{"metrics":[{"measurementTimestamp":"2026-11-12T00:00:00Z","metricQuantity":1,"libertyVersion":"26.0.0.12","edition":"Open"}]}]}]'
+```
+
+Send a second payload with different values on the same day, to see how breakdowns behave:
+
+```bash
+curl -k -L -w "\n%{http_code}\n" -X POST "https://${UMS_URL}/api/v1/event" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${UMS_TOKEN}" \
+  -d '[{"mappingId":"22222222222222222222222222222222","instances":[{"metrics":[{"measurementTimestamp":"2026-11-12T00:00:00Z","metricQuantity":1,"libertyVersion":"25.0.0.9","edition":"WebSphere"}]}]}]'
+```
+
+### 2.3 Check
+
+1. Pod log: the CR and payload joined, no `Rejecting data`.
+2. `/api/v1/raw`: search for `INSTANCE_COUNT`. Look for the breakdown values `26.0.0.12`, `Open`, `25.0.0.9`, `WebSphere` and how they are grouped. Note whether the second payload replaced the first (`LAST` on the whole metric) or was stored as a separate group.
+3. Export, filter to this metric, expect the breakdown in `usage.json`.
+4. Upload to Software Central, then check Amplitude for `Account Adoption Usage` and whether the breakdown values appear as properties. Record the property names.
+
+**Outcomes and what each means:**
+
+| Result | Meaning |
+|---|---|
+| Both groups stored, and the values appear in Amplitude | Version and edition can be reported this way. Use this design. |
+| Stored in UMS, absent in Amplitude | Breakdowns stay in UMS and do not reach Amplitude. Ask the UMS team what Software Central forwards. |
+| Second payload overwrote the first | `LAST` applies across groups in this setup. Ask how DB2 gets per-group values, and whether `repeat` is involved. |
+| Rejected | Compare the CR with the DB2 example, then send both to the UMS team. |
+
+### 2.4 After both tests
+
+Send the UMS team: the failing flat payload with `instanceId` and its error, the working CR plus payload from the first test, the results of Tests 1 and 2, and the metrics spreadsheet.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -879,7 +1023,7 @@ Timing: upload at 07:08, event in Amplitude at 07:09.
 | `oc apply`: `spec.mappingId ... must be of type string: "number"` | All-digit `mappingId` parsed as a YAML number | Quote it: `mappingId: "1111..."` |
 | `Invalid URL ... [No Host]` HTML page from `errors.edgesuite.net` | `UMS_URL` empty in a new shell, so the request went to `https:///api/v1/event` | Re-export the variables, check `echo $UMS_URL` |
 | `500 could not parse payload: productId is required` | The CR was not loaded yet, or no CR matches the `mappingId` | Wait a few minutes and resend, check `oc get ibmservicemeterdefinitions -n project-puma` |
-| `200` but pod log shows `Rejecting data ... no valid data field present in payload` | `instanceId` (or unknown keys) in a flat payload | Remove it. In the CR format set `instanceId` in the CR |
+| `200` but pod log shows `Rejecting data ... no valid data field present in payload` | `instanceId` (or unknown keys) in a flat payload | Remove it from the flat payload. **[Said]** `instanceId` is valid at instance level in the new format (Test 1). Why the flat format rejects it is **[Open]**, asked of the UMS team |
 | Pod log: `parsing time "\u003c2026-11-05\u003eT00:00:00Z"` | Literal `<` `>` left around a date placeholder | Use a plain date: `2026-11-05` |
 | `jq: parse error` on `/api/v1/raw` | Wrong route or empty variable returning HTML or text | Use `${FETCH_URL}`, check with `curl -i` |
 | Software Central `multiStatus` | Unfiltered export re-sent old events | Filter to the new event (Step 6) |
@@ -890,14 +1034,14 @@ A `200` from `/api/v1/event` means the request was received. It does not prove t
 
 ## Notes on the Liberty Client
 
-- The Liberty code at the time of this test (branch `liberty-ums-integration`) still sends the **flat** payload with the SHA-256 hash as `productId` and the Liberty version in `productMetric`. It does not send the ReadyTool ID or use a CR.
-- A shippable client would send only `mappingId`, a UTC timestamp, the value and any attributes, using a URL, token and certificate read from configuration. It should send nothing when UMS is not configured and treat non-2xx responses as warnings.
-- The CR must exist before the client sends. The operator or Helm chart that deploys UMS should create it.
+- The Liberty code at the time of this test (branch `liberty-ums-integration`) still sends the **flat** payload with the SHA-256 hash as `productId` and the Liberty version in `productMetric`. It does not send the ReadyTool ID or use a CR. **[Said]** the flat format is the legacy ILS-compatible API, CONTRACTUAL by design, and should not be used for new adoption data.
+- A shippable client would send the new-format payload (`instances` / `metrics`, ADOPTION), a UTC timestamp and any attributes, using a URL, token and certificate read from configuration. It should send nothing when UMS is not configured and treat non-2xx responses as warnings.
+- If a CR is used, it must exist before the client sends. Who creates it for Liberty is **[Open]**.
 - Security: do not commit tokens, the UMS URL or trust-all TLS code. A real bearer token was committed earlier and pushed. It must stay rotated.
 
 ## UMS Deployment Model (from the IBM guides) **[Doc]**
 
-- UMS is installed in the **same namespace** as the product. One instance per namespace is the model, and several can be installed.
+- UMS is installed in the **same namespace** as the product. One instance per namespace is the model, and several can be installed. **[Said]** one UMS can also cover several namespaces, and two products in one namespace share one UMS.
 - Supported on OpenShift and CNCF Kubernetes. Install methods are OLM catalog source, Helm, and CASE for air-gapped environments.
 - Standard mode covers usage-based and adoption metrics. PVU, VPC and GPGPU need the Helm install with the License Service sidecar.
 - Endpoint URL and TLS certificate are in the ConfigMap `ibm-usage-metering-upload-config` (the guide also names `ibm-usage-metering-service-upload-config`, which is inconsistent). The token is in the Secret `ibm-usage-metering-upload-token`, key `token`.
