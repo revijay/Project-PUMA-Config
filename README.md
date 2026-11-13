@@ -669,7 +669,8 @@ This section records how product-specific **adoption** data (as opposed to contr
 | Does an ADOPTION event reach Software Central? | **[Tested]** Yes. Upload status `success`, 1 of 1 events processed. |
 | Does it reach Amplitude? | **[Tested]** Yes, as the event `Account Adoption Usage`, about one minute after the upload. |
 | Are unregistered metric names rejected? | **[Tested]** Not in the sandbox. A made-up name (`libertyAdoptionTest`) in the metricName field passed UMS, Software Central and Amplitude. **[Said]** names are a free choice, but check with core products. |
-| Is a CR required? | **[Said]** No. Payload-only works in the new format. **[Open]**, see Test 1. |
+| Is a CR required? | **[Inference]** No. A payload-only ADOPTION event with a custom `instanceId` reached UMS, Software Central and Amplitude (Test 1), but the CR `open-liberty-adoption-test` still existed in the namespace. The payload had no `mappingId` and a different metric name, so the CR was almost certainly not used. Delete the CR and resend to confirm. A CR is still needed for breakdowns **[Said]**. |
+| What if `metricType` is omitted in the new format? | **[Tested, UMS log]** UMS logs `MetricType unspecified in payload, will set MetricType to ADOPTION`. The flat format is different: UMS converts it to `CONTRACTUAL`. |
 | Can version and edition be sent? | **[Said]** Yes, with the DB2 pattern (`breakdownDefs`). **[Open]**, see Test 2. |
 | What `productId` is accepted? | **[Tested]** The ReadyTool Cloud Annotations `productID`. The 64-character SHA-256 hash failed in Software Central. |
 
@@ -882,8 +883,8 @@ Source: meeting with Tomasz Zeller, Dariusz Permus and Michał Paluch. These are
 |---|---|---|
 | `productId` | Use the ReadyTool ID. It is the reconciliation key (entitlement, CCID, IBM taxonomy). | Matches our test |
 | Flat payload (`productId`, `productMetric`, `metricValue`, `logDate`) | Legacy ILS-compatible API, CONTRACTUAL by design, only for products migrating from ILS. Do not use for new work. | Matches our test |
-| CR | Not required. Needed only for hierarchical metrics. A payload-only request works in the new format. A CR is recommended because static data lives there and payloads stay small. No CR-free example exists in the docs yet. | *Test 1* |
-| `instanceId` | A free string with no validation, default is the namespace. You define it with your own logic. It goes **in the payload at instance level**. | *Test 1* |
+| CR | Not required. Needed only for hierarchical metrics. A payload-only request works in the new format. A CR is recommended because static data lives there and payloads stay small. No CR-free example exists in the docs yet. | Confirmed by Test 1 |
+| `instanceId` | A free string with no validation, default is the namespace. You define it with your own logic. It goes **in the payload at instance level**. | Confirmed by Test 1 |
 | Our `instanceId` rejection | Unexplained. The UMS team asked for the failing payload and cluster access. | **[Open]** |
 | Aggregation | Depends on `processing`: `MAX` keeps the largest value, `ADD` sums the day's payloads. | Documented |
 | Who deploys UMS | The adopting product owns, installs, upgrades and configures it. Typically one per namespace. One can cover several namespaces. | Liberty-side owner **[Open]** |
@@ -897,7 +898,27 @@ Source: meeting with Tomasz Zeller, Dariusz Permus and Michał Paluch. These are
 
 ## Test 1 - Payload Only, No CR, ADOPTION, `instanceId` at Instance Level
 
-**Purpose:** check the statements that a CR is optional and that `instanceId` is accepted inside the payload. Not run yet.
+**Purpose:** check the statements that a CR is optional and that `instanceId` is accepted inside the payload.
+
+**Result (run 2026-11-12) [Tested]:** passed end to end for a usage date of the **previous day**.
+
+| Stage | Observed |
+|---|---|
+| UMS | `200`. Pod log: `Events updated successfully`, with `instanceId`, `metricType: ADOPTION` and the ReadyTool `productId` in the data. `/api/v1/raw` showed `INSTANCE_COUNT`, `ADOPTION`, `processing: MAX` (UMS default), and a daily aggregate. |
+| Export (`/api/v1/swc`) | `clusterId` = `<cluster host>, test-instance-1`, `metricType: adoption`, `metricAggregationType: point-in-time`, `productType: cloudPak`. |
+| Software Central | `success` for both uploads. |
+| Amplitude | Event `Account Adoption Usage` for the **2026-11-11** event only. `instanceId` and `environment` = `<cluster host>, test-instance-1`, `unit` = `INSTANCE_COUNT`, `productCode` 5724J08, `quantity` 1, `quantityAggregator` `last_value`, `productTitle` Open Liberty (from the payload). `client_event_time` = 2026-11-12 00:00 (the end of the usage day). |
+
+Conclusions:
+- A CR is probably **not** needed for a plain ADOPTION metric. **[Inference]** The CR `open-liberty-adoption-test` still existed during the test. Evidence it was not used: no `mappingId` in the payload, metric name `INSTANCE_COUNT` instead of the CR's `libertyAdoptionTest`, and `processing: MAX` (the UMS default) instead of the CR's `LAST`. Delete the CR (`oc delete ibmservicemeterdefinition open-liberty-adoption-test -n project-puma`), wait a few minutes, resend with a new `instanceId` (for example `test-instance-nocr`) and a past date, and confirm `ADOPTION` in `/api/v1/raw` and the export.
+- **`metricType` default [Tested, UMS log]:** a second payload without `metricType` (`instanceId` `test-instance-notype`, date 2026-11-10) was accepted, and the pod log shows `MetricType unspecified in payload, will set MetricType to ADOPTION`. So the new format defaults to ADOPTION, while the flat format is converted to CONTRACTUAL. The stored value in `/api/v1/raw` and the export was not checked. The Liberty client should still send `"metricType":"ADOPTION"` explicitly, because the default may change in another UMS version.
+- A custom `instanceId` reaches Amplitude. UMS shows it as `<cluster host>, <instanceId>`. **[Tested]**
+- `processing` defaulted to `MAX`. Whether it can be set in a payload-only request is **[Open]**.
+- The pod log shows two `warn ... failed to eval condition` lines (the flat-format check and the `mappingId` check). They did not stop processing. **[Inference]** they are harmless.
+- The event dated **2026-11-12** (the day of sending) had been uploaded with Software Central status `success`, but it was **not found in Amplitude** at the time of checking (about 17:30 UTC on 11-12). The event for 11-11, uploaded shortly after, appeared. **[Inference]** an unfinished day is held back or dated into the future, which would be a one-day lag for a daily sender. Not confirmed. Re-check the 11-12 event after 2026-11-13 00:00 UTC.
+- Practical rule for tests: send a **past** date and filter Amplitude on `unit` or `productId`, not on `device_id`, which changes with each upload.
+
+For Test 1 with a different filter: in Steps 5 and 6, replace `libertyAdoptionTest` with `INSTANCE_COUNT`. If the export holds several dates, also filter on `.start==<epoch ms of the day>`, for example `jq '.data |= map(select(.measuredUsage[0].metricId=="INSTANCE_COUNT" and .start==1794355200000))'` for 2026-11-11.
 
 All product data is in the payload. `<INSTANCE_ID>` is any string. Use a test value such as `test-instance-1` first, because the real source (hash, UUID, or `getServerId()`) is undecided.
 
